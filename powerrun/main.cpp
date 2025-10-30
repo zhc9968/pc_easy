@@ -12,8 +12,10 @@
 #include <userenv.h>
 #include <accctrl.h>
 #include <aclapi.h>
+#include <sddl.h>
+#include <ntsecapi.h>
 #include <shlwapi.h>
-
+#include <Lmcons.h>
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "wtsapi32.lib")
 #pragma comment(lib, "userenv.lib")
@@ -29,12 +31,17 @@ void StopTrustedInstallerService();
 int StartTrustedInstallerService();
 void CreateProcessAsTrustedInstaller(DWORD pid, wstring commandLine);
 int trusted(const wchar_t* argv);
-void ShowErrorDetails(const string& context, DWORD errorCode = GetLastError()); // 添加默认参数
+void ShowErrorDetails(const string& context, DWORD errorCode = GetLastError());
 void GodTrusted(const wchar_t* commandLine);
+
+// 新增函数声明
+bool RunCommandLineMode(int argc, char* argv[]);
+void ShowCommandLineHelp();
+int ExecuteWithPrivilege(const QString& command, int privilegeLevel);
+void ShowPrivilegeMenu(const QString& command);
 
 // 修复后的错误处理函数
 void ShowErrorDetails(const string& context, DWORD errorCode) {
-    // 使用宽字符版本获取错误信息
     LPWSTR messageBuffer = nullptr;
     DWORD size = FormatMessageW(
         FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
@@ -49,7 +56,6 @@ void ShowErrorDetails(const string& context, DWORD errorCode) {
     QString message = QString::fromStdString(context) + "\n错误代码: " + QString::number(errorCode);
 
     if (size > 0 && messageBuffer != nullptr) {
-        // 正确转换宽字符到 QString
         message += "\n错误信息: " + QString::fromWCharArray(messageBuffer, size);
     } else {
         message += "\n无法获取错误信息";
@@ -71,14 +77,12 @@ public:
 
         QVBoxLayout *layout = new QVBoxLayout(this);
 
-        // 命令输入框
         QLabel *label = new QLabel("请输入要运行的项目\n\n非可执行文件仅可使用管理员和普通用户的权限模式打开");
         layout->addWidget(label);
 
         commandEdit = new QLineEdit(this);
         layout->addWidget(commandEdit);
 
-        // 按钮布局
         QHBoxLayout *buttonLayout = new QHBoxLayout();
 
         runButton = new QPushButton("运行", this);
@@ -92,18 +96,13 @@ public:
 
         layout->addLayout(buttonLayout);
 
-        // 连接信号
         connect(runButton, &QPushButton::clicked, this, &RunDialog::showRunOptions);
         connect(cancelButton, &QPushButton::clicked, this, &QWidget::close);
         connect(browseButton, &QPushButton::clicked, this, &RunDialog::browseFile);
     }
 
-private slots:
-    void showRunOptions() {
-        QString command = commandEdit->text().trimmed();
-        if (command.isEmpty()) return;
-
-        // 检测是否为可执行文件
+    // 公开运行函数，供命令行模式使用
+    void runWithOption(const QString& command, int option) {
         bool isExecutable = false;
         wstring wcommand = command.toStdWString();
         if (PathFileExistsW(wcommand.c_str())) {
@@ -111,40 +110,49 @@ private slots:
             isExecutable = GetBinaryTypeW(wcommand.c_str(), &binaryType);
         }
 
-        // 创建上下文菜单
-        QMenu contextMenu(this);
+        try {
+            switch (option) {
+            case 1: runCurrentUser(command, isExecutable); break;
+            case 2: runAsAdmin(command, isExecutable); break;
+            case 3: runAsSystem(command); break;
+            case 4: runAsTrustedInstaller(command); break;
+            case 5: runWithHighestIntegrity(command); break;
+            default: throw runtime_error("无效的运行选项");
+            }
+        } catch (const exception &e) {
+            ShowErrorDetails(e.what());
+        }
+    }
 
-        if (true) {
-            // 可执行文件 - 显示所有选项
-            contextMenu.addAction("受限用户")->setData(1);
-            contextMenu.addAction("当前用户")->setData(2);
-            contextMenu.addAction("管理员")->setData(3);
-            contextMenu.addAction("SYSTEM")->setData(4);
-            contextMenu.addAction("TrustedInstaller")->setData(5);
-            contextMenu.addAction("最高令牌完整性")->setData(6);
-        } else {
-            // 非可执行文件 - 只显示普通用户和管理员选项
-            contextMenu.addAction("普通用户运行")->setData(2);
-            contextMenu.addAction("管理员运行")->setData(3);
+    // 公开显示菜单函数
+    void showRunOptionsForCommand(const QString& command) {
+        bool isExecutable = false;
+        wstring wcommand = command.toStdWString();
+        if (PathFileExistsW(wcommand.c_str())) {
+            DWORD binaryType;
+            isExecutable = GetBinaryTypeW(wcommand.c_str(), &binaryType);
         }
 
-        QAction *selectedAction = contextMenu.exec(runButton->mapToGlobal(QPoint(0, runButton->height())));
+        QMenu contextMenu;
+
+        contextMenu.addAction("当前用户")->setData(1);
+        contextMenu.addAction("管理员")->setData(2);
+        contextMenu.addAction("SYSTEM")->setData(3);
+        contextMenu.addAction("TrustedInstaller")->setData(4);
+        contextMenu.addAction("最高令牌完整性")->setData(5);
+
+        QAction *selectedAction = contextMenu.exec(QCursor::pos());
         if (selectedAction) {
             int option = selectedAction->data().toInt();
-
-            try {
-                switch (option) {
-                case 1: runRestrictedUser(command); break;
-                case 2: runCurrentUser(command, isExecutable); break;
-                case 3: runAsAdmin(command, isExecutable); break;
-                case 4: runAsSystem(command); break;
-                case 5: runAsTrustedInstaller(command); break;
-                case 6: runWithHighestIntegrity(command); break;
-                }
-            } catch (const exception &e) {
-                ShowErrorDetails(e.what()); // 修复：使用单参数调用
-            }
+            runWithOption(command, option);
         }
+    }
+
+private slots:
+    void showRunOptions() {
+        QString command = commandEdit->text().trimmed();
+        if (command.isEmpty()) return;
+        showRunOptionsForCommand(command);
     }
 
     void browseFile() {
@@ -155,84 +163,55 @@ private slots:
     }
 
 private:
-    void runRestrictedUser(const QString &command) {
-        try {
-            EnablePrivilege(SE_RELABEL_NAME);
-            wstring cmd = command.toStdWString();
+    // 获取用户组特权列表
+    BOOL GetUserGroupPrivileges(PSID pUserGroupSID, PLUID* pPrivilegeLuid, PDWORD pDwCount) {
+        LSA_OBJECT_ATTRIBUTES ObjectAttributes;
+        ZeroMemory(&ObjectAttributes, sizeof(ObjectAttributes));
 
-            // 获取当前进程令牌
-            HANDLE hToken = NULL;
-            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &hToken)) {
-                throw runtime_error("OpenProcessToken失败");
-            }
+        LSA_HANDLE lsahPolicyHandle;
+        NTSTATUS ntsResult = LsaOpenPolicy(NULL, &ObjectAttributes, POLICY_ALL_ACCESS, &lsahPolicyHandle);
 
-            // 创建受限令牌
-            HANDLE hRestrictedToken = NULL;
-            if (!CreateRestrictedToken(hToken, DISABLE_MAX_PRIVILEGE, 0, nullptr, 0, nullptr, 0, nullptr, &hRestrictedToken)) {
-                CloseHandle(hToken);
-                throw runtime_error("CreateRestrictedToken失败");
-            }
-
-            // 复制令牌以便修改权限
-            HANDLE hTokenToUse = hRestrictedToken;
-            HANDLE hTempToken = NULL;
-            if (DuplicateTokenEx(hRestrictedToken, TOKEN_ALL_ACCESS, NULL,
-                                 SecurityImpersonation, TokenImpersonation, &hTempToken)) {
-                hTokenToUse = hTempToken;
-            }
-
-            // 设置低完整性级别
-            PSID lowSid = NULL;
-            if (!ConvertStringSidToSid(L"S-1-16-4096", &lowSid)) {
-                if (hTempToken) CloseHandle(hTempToken);
-                CloseHandle(hRestrictedToken);
-                CloseHandle(hToken);
-                throw runtime_error("ConvertStringSidToSid失败");
-            }
-
-            TOKEN_MANDATORY_LABEL tml = {0};
-            tml.Label.Attributes = SE_GROUP_INTEGRITY;
-            tml.Label.Sid = lowSid;
-
-            if (!SetTokenInformation(hTokenToUse, TokenIntegrityLevel, &tml, sizeof(tml))) {
-                LocalFree(lowSid);
-                if (hTempToken) CloseHandle(hTempToken);
-                CloseHandle(hRestrictedToken);
-                CloseHandle(hToken);
-                throw runtime_error("SetTokenInformation失败");
-            }
-            LocalFree(lowSid);
-
-            // 创建进程
-            STARTUPINFOW si = { sizeof(si) };
-            PROCESS_INFORMATION pi;
-            if (!CreateProcessAsUserW(
-                    hTokenToUse,
-                    nullptr,
-                    const_cast<LPWSTR>(cmd.c_str()),
-                    nullptr,
-                    nullptr,
-                    FALSE,
-                    CREATE_NEW_CONSOLE,
-                    nullptr,
-                    nullptr,
-                    &si,
-                    &pi)) {
-                DWORD err = GetLastError();
-                if (hTempToken) CloseHandle(hTempToken);
-                CloseHandle(hRestrictedToken);
-                CloseHandle(hToken);
-                throw runtime_error("CreateProcessAsUser失败");
-            }
-
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            if (hTempToken) CloseHandle(hTempToken);
-            CloseHandle(hRestrictedToken);
-            CloseHandle(hToken);
-        } catch (const exception &e) {
-            ShowErrorDetails(e.what()); // 修复：使用单参数调用
+        if (ntsResult != 0) {
+            return FALSE;
         }
+
+        PLSA_UNICODE_STRING UserRights = NULL;
+        ULONG uRightCount;
+        ntsResult = LsaEnumerateAccountRights(lsahPolicyHandle, pUserGroupSID, &UserRights, &uRightCount);
+
+        if (ntsResult != 0) {
+            LsaClose(lsahPolicyHandle);
+            return FALSE;
+        }
+
+        *pDwCount = 0;
+        *pPrivilegeLuid = (PLUID)LocalAlloc(LPTR, uRightCount * sizeof(LUID));
+        if (*pPrivilegeLuid == NULL) {
+            LsaFreeMemory(UserRights);
+            LsaClose(lsahPolicyHandle);
+            return FALSE;
+        }
+
+        for (ULONG uIdx = 0; uIdx < uRightCount; uIdx++) {
+            int nLenOfMultiChars = WideCharToMultiByte(CP_ACP, 0, UserRights[uIdx].Buffer,
+                                                       UserRights[uIdx].Length, NULL, 0, NULL, NULL);
+            PSTR pMultiCharStr = (PSTR)HeapAlloc(GetProcessHeap(), 0, nLenOfMultiChars * sizeof(char));
+
+            if (pMultiCharStr != NULL) {
+                WideCharToMultiByte(CP_ACP, 0, UserRights[uIdx].Buffer, UserRights[uIdx].Length,
+                                    pMultiCharStr, nLenOfMultiChars, NULL, NULL);
+
+                LUID luid;
+                if (LookupPrivilegeValueA(NULL, pMultiCharStr, &luid)) {
+                    (*pPrivilegeLuid)[(*pDwCount)++] = luid;
+                }
+                HeapFree(GetProcessHeap(), 0, pMultiCharStr);
+            }
+        }
+
+        LsaFreeMemory(UserRights);
+        LsaClose(lsahPolicyHandle);
+        return TRUE;
     }
 
     void runCurrentUser(const QString &command, bool isExecutable) {
@@ -240,7 +219,6 @@ private:
             wstring cmd = command.toStdWString();
 
             if (isExecutable) {
-                // 可执行文件 - 使用CreateProcess
                 STARTUPINFOW si = { sizeof(si) };
                 PROCESS_INFORMATION pi;
                 if (!CreateProcessW(
@@ -260,7 +238,6 @@ private:
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
             } else {
-                // 非可执行文件 - 使用ShellExecuteEx
                 SHELLEXECUTEINFOW sei = { sizeof(sei) };
                 sei.lpVerb = L"open";
                 sei.lpFile = cmd.c_str();
@@ -271,7 +248,7 @@ private:
                 }
             }
         } catch (const exception &e) {
-            ShowErrorDetails(e.what()); // 修复：使用单参数调用
+            ShowErrorDetails(e.what());
         }
     }
 
@@ -286,11 +263,11 @@ private:
 
             if (!ShellExecuteExW(&sei)) {
                 DWORD err = GetLastError();
-                if (err == ERROR_CANCELLED) return; // 用户取消了UAC提示
+                if (err == ERROR_CANCELLED) return;
                 throw runtime_error("ShellExecuteEx失败");
             }
         } catch (const exception &e) {
-            ShowErrorDetails(e.what()); // 修复：使用单参数调用
+            ShowErrorDetails(e.what());
         }
     }
 
@@ -298,31 +275,25 @@ private:
         try {
             wstring cmd = command.toStdWString();
 
-            // 确保我们有必要的特权
             EnablePrivilege(SE_DEBUG_NAME);
             EnablePrivilege(SE_RELABEL_NAME);
             EnablePrivilege(SE_IMPERSONATE_NAME);
             EnablePrivilege(SE_ASSIGNPRIMARYTOKEN_NAME);
 
-            // 模拟SYSTEM用户
             ImpersonateSystem();
 
-            // 获取模拟令牌
             HANDLE hToken = NULL;
             if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, FALSE, &hToken)) {
                 throw runtime_error("OpenThreadToken失败");
             }
 
-            // 复制令牌并设置完整性级别
             HANDLE hPrimaryToken = NULL;
-            // 修复：修正DuplicateTokenEx参数
             if (!DuplicateTokenEx(hToken, TOKEN_ALL_ACCESS, NULL,
                                   SecurityImpersonation, TokenPrimary, &hPrimaryToken)) {
                 CloseHandle(hToken);
                 throw runtime_error("DuplicateTokenEx失败");
             }
 
-            // 设置SYSTEM完整性级别
             PSID systemSid = NULL;
             if (!ConvertStringSidToSid(L"S-1-16-16384", &systemSid)) {
                 CloseHandle(hPrimaryToken);
@@ -342,7 +313,6 @@ private:
             }
             LocalFree(systemSid);
 
-            // 创建新进程
             STARTUPINFOW si = { sizeof(si) };
             PROCESS_INFORMATION pi;
             if (!CreateProcessAsUserW(
@@ -368,7 +338,7 @@ private:
             CloseHandle(hToken);
         } catch (const exception &e) {
             RevertToSelf();
-            ShowErrorDetails(e.what()); // 修复：使用单参数调用
+            ShowErrorDetails(e.what());
         }
         RevertToSelf();
     }
@@ -377,7 +347,7 @@ private:
         try {
             trusted(command.toStdWString().c_str());
         } catch (const exception &e) {
-            ShowErrorDetails(e.what()); // 修复：使用单参数调用
+            ShowErrorDetails(e.what());
         }
     }
 
@@ -386,7 +356,7 @@ private:
             EnablePrivilege(SE_RELABEL_NAME);
             GodTrusted(reinterpret_cast<const wchar_t *>(command.utf16()));
         } catch (const exception &e) {
-            ShowErrorDetails(e.what()); // 修复：使用单参数调用
+            ShowErrorDetails(e.what());
         }
     }
 
@@ -395,7 +365,76 @@ private:
     QPushButton *browseButton;
 };
 
-// 实现提供的辅助函数
+// 新增函数实现
+bool RunCommandLineMode(int argc, char* argv[]) {
+    if (argc < 2) {
+        return false; // 没有参数，显示主窗口
+    }
+
+    QString command = QString::fromLocal8Bit(argv[1]);
+
+    // 如果有第二个参数，直接使用指定权限运行
+    if (argc >= 3) {
+        bool ok;
+        int privilegeLevel = QString(argv[2]).toInt(&ok);
+        if (ok && privilegeLevel >= 1 && privilegeLevel <= 5) {
+            ExecuteWithPrivilege(command, privilegeLevel);
+            return true;
+        } else {
+            qCritical() << "错误: 无效的权限级别。必须是 1-5 之间的数字";
+            ShowCommandLineHelp();
+            return true;
+        }
+    }
+
+    // 只有一个参数，显示权限选择菜单
+    ShowPrivilegeMenu(command);
+    return true;
+}
+
+void ShowCommandLineHelp() {
+    qInfo() << "用法:";
+    qInfo() << "  powerrun.exe <目标程序> [权限级别]";
+    qInfo() << "";
+    qInfo() << "权限级别:";
+    qInfo() << "  1 - 当前用户";
+    qInfo() << "  2 - 管理员";
+    qInfo() << "  3 - SYSTEM";
+    qInfo() << "  4 - TrustedInstaller";
+    qInfo() << "  5 - 最高令牌完整性";
+    qInfo() << "";
+    qInfo() << "示例:";
+    qInfo() << "  powerrun.exe cmd.exe 2        # 以管理员权限运行cmd";
+    qInfo() << "  powerrun.exe notepad.exe      # 显示权限选择菜单";
+    qInfo() << "  powerrun.exe                  # 显示GUI主窗口";
+}
+
+int ExecuteWithPrivilege(const QString& command, int privilegeLevel) {
+    try {
+        RunDialog dialog;
+        dialog.runWithOption(command, privilegeLevel);
+        return 0;
+    } catch (const exception& e) {
+        qCritical() << "执行失败:" << e.what();
+        return 1;
+    }
+}
+
+void ShowPrivilegeMenu(const QString& command) {
+    QApplication app(__argc, __argv);
+
+    // 创建隐藏的RunDialog实例来使用其菜单功能
+    RunDialog* dialog = new RunDialog();
+    dialog->showRunOptionsForCommand(command);
+
+    // 菜单选择完成后退出应用
+    QTimer::singleShot(100, &app, &QApplication::quit);
+    app.exec();
+
+    delete dialog;
+}
+
+// 原有的辅助函数实现保持不变
 void EnablePrivilege(wstring privilegeName) {
     HANDLE hToken = NULL;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &hToken)) {
@@ -654,17 +693,12 @@ void CreateProcessAsTrustedInstaller(DWORD pid, wstring commandLine) {
 int trusted(const wchar_t* argv) {
     wstring commandLine = argv;
     try {
-        // 停止TrustedInstaller服务（如果正在运行）
         try {
             StopTrustedInstallerService();
         } catch (...) {
-            // 忽略停止服务失败的错误
         }
 
-        // 启动TrustedInstaller服务并获取进程ID
         auto pid = StartTrustedInstallerService();
-
-        // 使用TrustedInstaller权限创建新进程
         CreateProcessAsTrustedInstaller(pid, L"\"" + commandLine + L"\"");
     }
     catch (const exception& e) {
@@ -674,11 +708,6 @@ int trusted(const wchar_t* argv) {
     return 0;
 }
 
-// ========== 常量定义 ==========
-#define ML_SYSTEM_RID (0x00002000L) // 系统完整性级别
-// ========== 辅助函数 ==========
-
-// 获取所有特权列表
 vector<wstring> GetAllPrivileges() {
     return {
         SE_ASSIGNPRIMARYTOKEN_NAME,
@@ -718,12 +747,9 @@ vector<wstring> GetAllPrivileges() {
     };
 }
 
-// 在令牌上启用所有特权
 void EnableAllPrivileges(HANDLE hToken) {
-    // 获取所有特权名称
     auto privileges = GetAllPrivileges();
 
-    // 准备特权数组
     vector<LUID> luids;
     for (const auto& priv : privileges) {
         LUID luid;
@@ -732,7 +758,6 @@ void EnableAllPrivileges(HANDLE hToken) {
         }
     }
 
-    // 设置特权属性
     vector<TOKEN_PRIVILEGES> tpArray;
     for (const auto& luid : luids) {
         TOKEN_PRIVILEGES tp;
@@ -742,7 +767,6 @@ void EnableAllPrivileges(HANDLE hToken) {
         tpArray.push_back(tp);
     }
 
-    // 逐个启用特权
     for (const auto& tp : tpArray) {
         if (!AdjustTokenPrivileges(
                 hToken,
@@ -768,16 +792,13 @@ void EnableAllPrivileges(HANDLE hToken) {
         }
     }
 }
-// 创建上帝模式令牌（SYSTEM + TrustedInstaller 结合体）
+
 HANDLE CreateGodToken() {
-    // 1. 获取 TrustedInstaller 令牌
     DWORD tiPid = 0;
 
-    // 停止并重新启动 TrustedInstaller 服务
     try {
         StopTrustedInstallerService();
     } catch (...) {
-        // 忽略停止失败
     }
 
     tiPid = StartTrustedInstallerService();
@@ -793,7 +814,6 @@ HANDLE CreateGodToken() {
         throw runtime_error("无法打开 TrustedInstaller 令牌");
     }
 
-    // 2. 复制令牌以便修改
     HANDLE hGodToken = NULL;
     if (!DuplicateTokenEx(
             hTIToken,
@@ -811,46 +831,20 @@ HANDLE CreateGodToken() {
     CloseHandle(hTIProcess);
 
     EnablePrivilege(L"SeRelabelPrivilege");
-
-    // 3. 启用所有可能的特权
     EnableAllPrivileges(hGodToken);
-
-    // // 4. 设置最高完整性级别
-    // BOOL result = SetTokenInformation(
-    //     hGodToken,
-    //     TokenIntegrityLevel,
-    //     (LPVOID)ML_SYSTEM_RID,
-    //     sizeof(DWORD));
-
-    // if (!result) {
-    //     // 如果设置系统完整性失败，尝试高完整性
-    //     DWORD integrityLevel = SECURITY_MANDATORY_HIGH_RID;
-    //     if (!SetTokenInformation(
-    //             hGodToken,
-    //             TokenIntegrityLevel,
-    //             &integrityLevel,
-    //             sizeof(DWORD))) {
-    //         CloseHandle(hGodToken);
-    //         throw runtime_error("无法设置令牌完整性级别");
-    //     }
-    // }
 
     return hGodToken;
 }
 
-// GodTrusted 函数 - 创建具有所有特权的超级进程
 void GodTrusted(const wchar_t* commandLine) {
     EnablePrivilege(SE_IMPERSONATE_NAME);
-    // 1. 创建上帝令牌
     HANDLE hGodToken = CreateGodToken();
     if (hGodToken == NULL) {
         throw runtime_error("无法创建上帝令牌");
     }
 
-    // 2. 确保当前进程有 SeAssignPrimaryTokenPrivilege 特权
     EnablePrivilege(SE_ASSIGNPRIMARYTOKEN_NAME);
 
-    // 3. 使用 CreateProcessWithTokenW 创建进程
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
 
@@ -860,13 +854,12 @@ void GodTrusted(const wchar_t* commandLine) {
 
     ZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
 
-    // 转换为可写字符串
     wstring cmdLine = commandLine;
     vector<wchar_t> writableCmdLine(cmdLine.begin(), cmdLine.end());
     writableCmdLine.push_back(L'\0');
 
     BOOL success = CreateProcessWithTokenW(
-        hGodToken, // 主令牌
+        hGodToken,
         LOGON_WITH_PROFILE,
         NULL,
         writableCmdLine.data(),
@@ -895,13 +888,11 @@ void GodTrusted(const wchar_t* commandLine) {
         throw runtime_error("CreateProcessWithTokenW 失败: " + errorMsg);
     }
 
-    // 清理资源
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     CloseHandle(hGodToken);
 }
 
-// 检查是否以管理员身份运行
 bool IsRunAsAdmin() {
     SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
     PSID AdministratorsGroup = NULL;
@@ -916,7 +907,12 @@ bool IsRunAsAdmin() {
 }
 
 int main(int argc, char *argv[]) {
-    // 检查是否以管理员身份运行，如果不是则请求提升
+    // 首先检查命令行参数
+    if (RunCommandLineMode(argc, argv)) {
+        return 0;
+    }
+
+    // 如果没有命令行参数，检查管理员权限并显示主窗口
     if (!IsRunAsAdmin()) {
         wstring modulePath(MAX_PATH, L'\0');
         GetModuleFileNameW(NULL, &modulePath[0], MAX_PATH);

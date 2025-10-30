@@ -40,107 +40,46 @@
 #include <QLocalSocket>
 #include <QLocalServer>
 #include <QWindow>
+#include <shellapi.h>
 
-// 低级键盘钩子管理器类
-class KeyboardHook : public QObject, public QAbstractNativeEventFilter {
-    Q_OBJECT
-public:
-    static KeyboardHook* instance() {
-        static KeyboardHook instance;
-        return &instance;
+// 检查是否具有管理员权限
+bool isRunningAsAdmin() {
+    BOOL isAdmin = FALSE;
+    PSID adminGroup = NULL;
+
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
+        if (!CheckTokenMembership(NULL, adminGroup, &isAdmin)) {
+            isAdmin = FALSE;
+        }
+        FreeSid(adminGroup);
     }
 
-    bool registerShortcut(UINT modifiers, UINT key, const QString& identifier) {
-        if (m_hook) return true; // 钩子已经安装
+    return isAdmin == TRUE;
+}
 
-        m_hook = SetWindowsHookEx(WH_KEYBOARD_LL, lowLevelKeyboardProc, GetModuleHandle(NULL), 0);
-        if (!m_hook) {
-            qWarning() << "Failed to install keyboard hook:" << GetLastError();
-            return false;
-        }
+// 以管理员权限重新启动程序
+bool restartAsAdminRun() {
+    wchar_t modulePath[MAX_PATH];
+    GetModuleFileNameW(NULL, modulePath, MAX_PATH);
 
-        m_shortcuts.insert(qMakePair(modifiers, key), identifier);
+    SHELLEXECUTEINFOW shellExecuteInfo = {0};
+    shellExecuteInfo.cbSize = sizeof(SHELLEXECUTEINFOW);
+    shellExecuteInfo.lpVerb = L"runas";
+    shellExecuteInfo.lpFile = modulePath;
+    shellExecuteInfo.lpParameters = GetCommandLineW();
+    shellExecuteInfo.nShow = SW_SHOWNORMAL;
+    shellExecuteInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
+
+    if (ShellExecuteExW(&shellExecuteInfo)) {
+        WaitForSingleObject(shellExecuteInfo.hProcess, INFINITE);
+        CloseHandle(shellExecuteInfo.hProcess);
         return true;
     }
 
-    void unregisterShortcut(UINT modifiers, UINT key) {
-        m_shortcuts.remove(qMakePair(modifiers, key));
-
-        if (m_shortcuts.isEmpty() && m_hook) {
-            UnhookWindowsHookEx(m_hook);
-            m_hook = NULL;
-        }
-    }
-
-    void unregisterAll() {
-        m_shortcuts.clear();
-        if (m_hook) {
-            UnhookWindowsHookEx(m_hook);
-            m_hook = NULL;
-        }
-    }
-
-    // 修改方法签名
-    bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) override {
-        Q_UNUSED(eventType);
-        Q_UNUSED(result);
-
-        MSG* msg = static_cast<MSG*>(message);
-        if (msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN) {
-            UINT vkCode = static_cast<UINT>(msg->wParam);
-            UINT modifiers = 0;
-
-            if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= MOD_CONTROL;
-            if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= MOD_SHIFT;
-            if (GetKeyState(VK_MENU) & 0x8000) modifiers |= MOD_ALT;
-            if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= MOD_WIN;
-
-            QPair<UINT, UINT> keyCombo(modifiers, vkCode);
-            if (m_shortcuts.contains(keyCombo)) {
-                emit shortcutTriggered(m_shortcuts[keyCombo]);
-                return true;
-            }
-        }
-        return false;
-    }
-
-signals:
-    void shortcutTriggered(const QString& identifier);
-
-private:
-    KeyboardHook() : m_hook(NULL) {
-        qApp->installNativeEventFilter(this);
-    }
-
-    ~KeyboardHook() {
-        unregisterAll();
-    }
-
-    static LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
-        if (nCode == HC_ACTION) {
-            KBDLLHOOKSTRUCT* pKeyBoard = (KBDLLHOOKSTRUCT*)lParam;
-            if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
-                UINT vkCode = pKeyBoard->vkCode;
-                UINT modifiers = 0;
-
-                if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= MOD_CONTROL;
-                if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= MOD_SHIFT;
-                if (GetKeyState(VK_MENU) & 0x8000) modifiers |= MOD_ALT;
-                if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) modifiers |= MOD_WIN;
-
-                QPair<UINT, UINT> keyCombo(modifiers, vkCode);
-                if (instance()->m_shortcuts.contains(keyCombo)) {
-                    emit instance()->shortcutTriggered(instance()->m_shortcuts[keyCombo]);
-                    return 1; // 阻止事件传递
-                }
-            }
-        }
-        return CallNextHookEx(NULL, nCode, wParam, lParam);
-    }
-
-    HHOOK m_hook;
-    QMap<QPair<UINT, UINT>, QString> m_shortcuts;
-};
+    return false;
+}
 
 // 在文件开头添加开关按钮类的定义
 class SwitchButton : public QWidget {
@@ -254,7 +193,7 @@ public:
         QAction *showMainAction = trayMenu->addAction("显示主窗口");
         QAction *openExplorerAction = trayMenu->addAction("打开资源管理器");
         QAction *openPowerRunAction = trayMenu->addAction("打开运行工具");
-        QAction *openScreenManagerAction = trayMenu->addAction("打开窗口管理器"); // 新增
+        QAction *openScreenManagerAction = trayMenu->addAction("打开窗口管理器");
         QAction *openAutorunAction = trayMenu->addAction("打开自启动管理器");
         QAction *openOptimizerAction = trayMenu->addAction("打开系统优化器");
         trayMenu->addSeparator();
@@ -266,7 +205,7 @@ public:
         connect(showMainAction, &QAction::triggered, this, &TrayIcon::showMainWindow);
         connect(openExplorerAction, &QAction::triggered, this, &TrayIcon::openExplorer);
         connect(openPowerRunAction, &QAction::triggered, this, &TrayIcon::openPowerRun);
-        connect(openScreenManagerAction, &QAction::triggered, this, &TrayIcon::openScreenManager); // 新增
+        connect(openScreenManagerAction, &QAction::triggered, this, &TrayIcon::openScreenManager);
         connect(openAutorunAction, &QAction::triggered, this, &TrayIcon::openAutorun);
         connect(openOptimizerAction, &QAction::triggered, this, &TrayIcon::openOptimizer);
         connect(exitAction, &QAction::triggered, this, &TrayIcon::exitApplication);
@@ -283,7 +222,7 @@ signals:
     void showMainRequested();
     void openExplorerRequested();
     void openPowerRunRequested();
-    void openScreenManagerRequested(); // 新增
+    void openScreenManagerRequested();
     void openAutorunRequested();
     void openOptimizerRequested();
     void exitRequested();
@@ -292,21 +231,24 @@ private slots:
     void showMainWindow() { emit showMainRequested(); }
     void openExplorer() { emit openExplorerRequested(); }
     void openPowerRun() { emit openPowerRunRequested(); }
-    void openScreenManager() { emit openScreenManagerRequested(); } // 新增
+    void openScreenManager() { emit openScreenManagerRequested(); }
     void openAutorun() { emit openAutorunRequested(); }
     void openOptimizer() { emit openOptimizerRequested(); }
     void exitApplication() { emit exitRequested(); }
 };
 
-// 修改SettingsDialog类
+// 修改SettingsDialog类，删除快捷键部分，添加新的右键菜单选项
 class SettingsDialog : public QDialog {
     Q_OBJECT
 public:
     SettingsDialog(QWidget *parent = nullptr) : QDialog(parent) {
         setWindowTitle("设置");
-        setFixedSize(500, 400);
+        setFixedSize(500, 500); // 增加高度以容纳新选项
 
         QVBoxLayout *mainLayout = new QVBoxLayout(this);
+
+        // 检查管理员权限
+        bool isAdmin = isRunningAsAdmin();
 
         // 开机自启动设置组
         QGroupBox *autoStartGroup = new QGroupBox("开机自启动", this);
@@ -315,57 +257,74 @@ public:
         QHBoxLayout *autoStartSwitchLayout = new QHBoxLayout();
         QLabel *autoStartLabel = new QLabel("开机时自动启动 pc_easy", autoStartGroup);
         m_autoStartSwitch = new SwitchButton(autoStartGroup);
+        m_autoStartSwitch->setEnabled(isAdmin);
 
         autoStartSwitchLayout->addWidget(autoStartLabel);
         autoStartSwitchLayout->addStretch();
         autoStartSwitchLayout->addWidget(m_autoStartSwitch);
 
         autoStartLayout->addLayout(autoStartSwitchLayout);
-        autoStartLayout->addWidget(new QLabel("启用后，pc_easy 将在系统启动时自动运行并最小化到系统托盘", autoStartGroup));
+        if (!isAdmin) {
+            autoStartLayout->addWidget(new QLabel("<font color='red'>需要管理员权限才能设置全局自启动</font>", autoStartGroup));
+        } else {
+            autoStartLayout->addWidget(new QLabel("启用后，pc_easy 将在系统启动时自动运行并最小化到系统托盘", autoStartGroup));
+        }
 
         mainLayout->addWidget(autoStartGroup);
 
-        // 快捷键设置组
-        QGroupBox *shortcutGroup = new QGroupBox("全局快捷键", this);
-        QFormLayout *shortcutLayout = new QFormLayout(shortcutGroup);
-
-        // 资源管理器快捷键
-        QHBoxLayout *explorerShortcutLayout = new QHBoxLayout();
-        m_explorerShortcutSwitch = new SwitchButton(shortcutGroup);
-        QLabel *explorerLabel = new QLabel("Ctrl + Win + E - 打开资源管理器", shortcutGroup);
-
-        explorerShortcutLayout->addWidget(m_explorerShortcutSwitch);
-        explorerShortcutLayout->addWidget(explorerLabel);
-        shortcutLayout->addRow("资源管理器:", explorerShortcutLayout);
-
-        // 运行工具快捷键
-        QHBoxLayout *powerrunShortcutLayout = new QHBoxLayout();
-        m_powerrunShortcutSwitch = new SwitchButton(shortcutGroup);
-        QLabel *powerrunLabel = new QLabel("Ctrl + Win + R - 打开运行工具", shortcutGroup);
-
-        powerrunShortcutLayout->addWidget(m_powerrunShortcutSwitch);
-        powerrunShortcutLayout->addWidget(powerrunLabel);
-        shortcutLayout->addRow("运行工具:", powerrunShortcutLayout);
-
-        mainLayout->addWidget(shortcutGroup);
-
-        // 右键菜单设置组
+        // 右键菜单设置组 - 修改为三个独立的右键菜单选项
         QGroupBox *contextMenuGroup = new QGroupBox("右键菜单设置", this);
         QVBoxLayout *contextLayout = new QVBoxLayout(contextMenuGroup);
 
-        QHBoxLayout *contextSwitchLayout = new QHBoxLayout();
-        QLabel *contextLabel = new QLabel("在资源管理器右键菜单中添加'使用pc_easy打开'", contextMenuGroup);
-        m_contextMenuSwitch = new SwitchButton(contextMenuGroup);
+        // 使用pc_easy打开
+        QHBoxLayout *openWithLayout = new QHBoxLayout();
+        QLabel *openWithLabel = new QLabel("添加'使用pc_easy打开'右键菜单", contextMenuGroup);
+        m_openWithSwitch = new SwitchButton(contextMenuGroup);
+        m_openWithSwitch->setEnabled(isAdmin);
 
-        contextSwitchLayout->addWidget(contextLabel);
-        contextSwitchLayout->addStretch();
-        contextSwitchLayout->addWidget(m_contextMenuSwitch);
+        openWithLayout->addWidget(openWithLabel);
+        openWithLayout->addStretch();
+        openWithLayout->addWidget(m_openWithSwitch);
+        contextLayout->addLayout(openWithLayout);
 
-        contextLayout->addLayout(contextSwitchLayout);
-        contextLayout->addWidget(new QLabel("启用后，在文件或文件夹上右键点击时会出现'使用pc_easy打开'选项", contextMenuGroup));
+        // 高权限运行
+        QHBoxLayout *powerRunLayout = new QHBoxLayout();
+        QLabel *powerRunLabel = new QLabel("添加'高权限运行'右键菜单", contextMenuGroup);
+        m_powerRunSwitch = new SwitchButton(contextMenuGroup);
+        m_powerRunSwitch->setEnabled(isAdmin);
+
+        powerRunLayout->addWidget(powerRunLabel);
+        powerRunLayout->addStretch();
+        powerRunLayout->addWidget(m_powerRunSwitch);
+        contextLayout->addLayout(powerRunLayout);
+
+        // 解除文件占用
+        QHBoxLayout *unlockLayout = new QHBoxLayout();
+        QLabel *unlockLabel = new QLabel("添加'解除文件占用'右键菜单", contextMenuGroup);
+        m_unlockSwitch = new SwitchButton(contextMenuGroup);
+        m_unlockSwitch->setEnabled(isAdmin);
+
+        unlockLayout->addWidget(unlockLabel);
+        unlockLayout->addStretch();
+        unlockLayout->addWidget(m_unlockSwitch);
+        contextLayout->addLayout(unlockLayout);
+
+        // 权限提示
+        if (!isAdmin) {
+            contextLayout->addWidget(new QLabel("<font color='red'>需要管理员权限才能设置右键菜单</font>", contextMenuGroup));
+        } else {
+            contextLayout->addWidget(new QLabel("启用后，在文件或文件夹上右键点击时会出现相应的菜单选项", contextMenuGroup));
+        }
 
         mainLayout->addWidget(contextMenuGroup);
         mainLayout->addStretch();
+
+        // 权限提示
+        if (!isAdmin) {
+            QLabel *adminWarning = new QLabel("<font color='red'><b>警告：当前程序未以管理员权限运行，部分设置可能无法生效</b></font>");
+            adminWarning->setWordWrap(true);
+            mainLayout->insertWidget(0, adminWarning);
+        }
 
         // 按钮布局
         QHBoxLayout *buttonLayout = new QHBoxLayout();
@@ -390,52 +349,74 @@ public:
         return m_autoStartSwitch->isChecked();
     }
 
-    bool isExplorerShortcutEnabled() const {
-        return m_explorerShortcutSwitch->isChecked();
+    bool isOpenWithEnabled() const {
+        return m_openWithSwitch->isChecked();
     }
 
-    bool isPowerrunShortcutEnabled() const {
-        return m_powerrunShortcutSwitch->isChecked();
+    bool isPowerRunEnabled() const {
+        return m_powerRunSwitch->isChecked();
     }
 
-    bool isContextMenuEnabled() const {
-        return m_contextMenuSwitch->isChecked();
+    bool isUnlockEnabled() const {
+        return m_unlockSwitch->isChecked();
     }
 
 private slots:
     void onOkClicked() {
-        saveSettings();
-        accept();
+        if (!isRunningAsAdmin()) {
+            // 检查需要管理员权限的设置
+            if ((m_autoStartSwitch->isChecked() && !m_originalAutoStart) ||
+                (m_openWithSwitch->isChecked() && !m_originalOpenWith) ||
+                (m_powerRunSwitch->isChecked() && !m_originalPowerRun) ||
+                (m_unlockSwitch->isChecked() && !m_originalUnlock)) {
+
+                QMessageBox::warning(this, "权限不足",
+                                     "需要管理员权限才能设置自启动和右键菜单。\n"
+                                     "请以管理员权限重新启动程序。");
+                return;
+            }
+        }
+
+        if (saveSettings()) {
+            accept();
+        }
     }
 
 private:
     void loadSettings() {
-        QSettings settings("HKEY_CURRENT_USER\\Software\\pc_easy", QSettings::NativeFormat);
+        // 使用全局注册表路径
+        QSettings settings("HKEY_LOCAL_MACHINE\\Software\\pc_easy", QSettings::NativeFormat);
 
         // 先断开所有信号连接，避免触发状态改变信号
         disconnectAllSignals();
 
         bool autoStart = settings.value("AutoStartEnabled", false).toBool();
-        bool explorerShortcut = settings.value("ExplorerShortcutEnabled", false).toBool();
-        bool powerrunShortcut = settings.value("PowerrunShortcutEnabled", false).toBool();
-        bool contextMenu = settings.value("ContextMenuEnabled", false).toBool();
+        bool openWith = settings.value("OpenWithEnabled", false).toBool();
+        bool powerRun = settings.value("PowerRunEnabled", false).toBool();
+        bool unlock = settings.value("UnlockEnabled", false).toBool();
+
+        // 保存原始值用于比较
+        m_originalAutoStart = autoStart;
+        m_originalOpenWith = openWith;
+        m_originalPowerRun = powerRun;
+        m_originalUnlock = unlock;
 
         // 使用阻塞信号的方式设置状态
         m_autoStartSwitch->blockSignals(true);
         m_autoStartSwitch->setChecked(autoStart);
         m_autoStartSwitch->blockSignals(false);
 
-        m_explorerShortcutSwitch->blockSignals(true);
-        m_explorerShortcutSwitch->setChecked(explorerShortcut);
-        m_explorerShortcutSwitch->blockSignals(false);
+        m_openWithSwitch->blockSignals(true);
+        m_openWithSwitch->setChecked(openWith);
+        m_openWithSwitch->blockSignals(false);
 
-        m_powerrunShortcutSwitch->blockSignals(true);
-        m_powerrunShortcutSwitch->setChecked(powerrunShortcut);
-        m_powerrunShortcutSwitch->blockSignals(false);
+        m_powerRunSwitch->blockSignals(true);
+        m_powerRunSwitch->setChecked(powerRun);
+        m_powerRunSwitch->blockSignals(false);
 
-        m_contextMenuSwitch->blockSignals(true);
-        m_contextMenuSwitch->setChecked(contextMenu);
-        m_contextMenuSwitch->blockSignals(false);
+        m_unlockSwitch->blockSignals(true);
+        m_unlockSwitch->setChecked(unlock);
+        m_unlockSwitch->blockSignals(false);
 
         // 重新连接信号
         reconnectSignals();
@@ -444,95 +425,153 @@ private:
     // 断开所有信号连接
     void disconnectAllSignals() {
         disconnect(m_autoStartSwitch, &SwitchButton::stateChanged, nullptr, nullptr);
-        disconnect(m_explorerShortcutSwitch, &SwitchButton::stateChanged, nullptr, nullptr);
-        disconnect(m_powerrunShortcutSwitch, &SwitchButton::stateChanged, nullptr, nullptr);
-        disconnect(m_contextMenuSwitch, &SwitchButton::stateChanged, nullptr, nullptr);
+        disconnect(m_openWithSwitch, &SwitchButton::stateChanged, nullptr, nullptr);
+        disconnect(m_powerRunSwitch, &SwitchButton::stateChanged, nullptr, nullptr);
+        disconnect(m_unlockSwitch, &SwitchButton::stateChanged, nullptr, nullptr);
     }
 
     // 重新连接信号
     void reconnectSignals() {
-        connect(m_explorerShortcutSwitch, &SwitchButton::stateChanged, this, [this](bool state) {
-            // 这里只是预览，不会立即注册
-            // 实际注册在 saveSettings() 中处理
-        });
-        connect(m_powerrunShortcutSwitch, &SwitchButton::stateChanged, this, [this](bool state) {
-            // 这里只是预览，不会立即注册
-            // 实际注册在 saveSettings() 中处理
-        });
-        connect(m_contextMenuSwitch, &SwitchButton::stateChanged, this, &SettingsDialog::updateContextMenu);
+        // 不需要特殊处理，只是防止信号触发
     }
 
-    void saveSettings() {
-        QSettings settings("HKEY_CURRENT_USER\\Software\\pc_easy", QSettings::NativeFormat);
+    bool saveSettings() {
+        // 使用全局注册表路径
+        QSettings settings("HKEY_LOCAL_MACHINE\\Software\\pc_easy", QSettings::NativeFormat);
+
+        // 检查写入权限
+        settings.setValue("TestWrite", "test");
+        if (settings.status() != QSettings::NoError) {
+            QMessageBox::critical(this, "保存失败",
+                                  "无法写入全局注册表设置！\n"
+                                  "请以管理员权限运行程序。");
+            return false;
+        }
+        settings.remove("TestWrite"); // 删除测试项
+
         settings.setValue("AutoStartEnabled", m_autoStartSwitch->isChecked());
-        settings.setValue("ExplorerShortcutEnabled", m_explorerShortcutSwitch->isChecked());
-        settings.setValue("PowerrunShortcutEnabled", m_powerrunShortcutSwitch->isChecked());
-        settings.setValue("ContextMenuEnabled", m_contextMenuSwitch->isChecked());
+        settings.setValue("OpenWithEnabled", m_openWithSwitch->isChecked());
+        settings.setValue("PowerRunEnabled", m_powerRunSwitch->isChecked());
+        settings.setValue("UnlockEnabled", m_unlockSwitch->isChecked());
 
-        updateAutoStart(m_autoStartSwitch->isChecked());
-        updateContextMenu(m_contextMenuSwitch->isChecked());
-
-        // 只在保存设置时才真正注册/注销快捷键
-        if (m_explorerShortcutSwitch->isChecked()) {
-            KeyboardHook::instance()->registerShortcut(MOD_CONTROL | MOD_WIN, 'E', "explorer");
-        } else {
-            KeyboardHook::instance()->unregisterShortcut(MOD_CONTROL | MOD_WIN, 'E');
+        // 更新设置
+        if (!updateAutoStart(m_autoStartSwitch->isChecked())) {
+            QMessageBox::warning(this, "设置失败", "无法设置全局自启动，需要管理员权限。");
+            return false;
         }
 
-        if (m_powerrunShortcutSwitch->isChecked()) {
-            KeyboardHook::instance()->registerShortcut(MOD_CONTROL | MOD_WIN, 'R', "powerrun");
-        } else {
-            KeyboardHook::instance()->unregisterShortcut(MOD_CONTROL | MOD_WIN, 'R');
+        if (!updateContextMenu()) {
+            QMessageBox::warning(this, "设置失败", "无法设置右键菜单，需要管理员权限。");
+            return false;
         }
+
+        return true;
     }
 
-    void updateAutoStart(bool enabled) {
-        QSettings autoStartSettings("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", QSettings::NativeFormat);
+    bool updateAutoStart(bool enabled) {
+        if (enabled && !isRunningAsAdmin()) {
+            return false;
+        }
+
+        // 使用全局自启动路径（所有用户）
+        QSettings autoStartSettings("HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", QSettings::NativeFormat);
 
         QString appPath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
 
         if (enabled) {
             autoStartSettings.setValue("pc_easy", "\"" + appPath + "\" -autoRun");
+            return (autoStartSettings.status() == QSettings::NoError);
         } else {
             autoStartSettings.remove("pc_easy");
+            return true;
         }
     }
 
-    void updateContextMenu(bool enabled) {
+    bool updateContextMenu() {
+        if ((m_openWithSwitch->isChecked() || m_powerRunSwitch->isChecked() || m_unlockSwitch->isChecked()) &&
+            !isRunningAsAdmin()) {
+            return false;
+        }
+
         QString appPath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
         QString expPath = QDir::toNativeSeparators(QCoreApplication::applicationDirPath() + "/Exp.exe");
+        QString powerrunPath = QDir::toNativeSeparators(QCoreApplication::applicationDirPath() + "/PowerRun.exe");
 
-        // 注册表路径
+        // 注册表路径（全局）
         QStringList keys = {
-            "HKEY_CLASSES_ROOT\\*\\shell\\pc_easy",
-            "HKEY_CLASSES_ROOT\\Directory\\shell\\pc_easy",
-            "HKEY_CLASSES_ROOT\\Directory\\Background\\shell\\pc_easy"
+            "HKEY_CLASSES_ROOT\\*\\shell",
+            "HKEY_CLASSES_ROOT\\Directory\\shell",
+            "HKEY_CLASSES_ROOT\\Directory\\Background\\shell"
         };
 
-        if (enabled) {
-            // 添加右键菜单项
-            for (const QString &key : keys) {
-                QSettings settings(key, QSettings::NativeFormat);
-                settings.setValue(".", "使用pc_easy打开");
-                settings.setValue("Icon", appPath);
+        // 清理旧的右键菜单
+        cleanupOldContextMenu(keys);
 
-                QSettings commandSettings(key + "\\command", QSettings::NativeFormat);
-                commandSettings.setValue(".", "\"" + expPath + "\" \"%1\"");
+        // 添加新的右键菜单
+        if (m_openWithSwitch->isChecked()) {
+            if (!addContextMenuItem(keys, "pc_easy_open", "使用pc_easy打开",
+                                    "\"" + expPath + "\" \"%1\"")) {
+                return false;
             }
-        } else {
-            // 移除右键菜单项
-            for (const QString &key : keys) {
-                QSettings settings(key, QSettings::NativeFormat);
+        }
+
+        if (m_powerRunSwitch->isChecked()) {
+            if (!addContextMenuItem(keys, "pc_easy_powerrun", "高权限运行",
+                                    "\"" + powerrunPath + "\" \"%1\"")) {
+                return false;
+            }
+        }
+
+        if (m_unlockSwitch->isChecked()) {
+            if (!addContextMenuItem(keys, "pc_easy_unlock", "解除文件占用",
+                                    "\"" + expPath + "\" \"%1\" unlock")) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    void cleanupOldContextMenu(const QStringList& keys) {
+        // 清理所有旧的pc_easy相关菜单项
+        QStringList oldItems = {"pc_easy", "pc_easy_open", "pc_easy_powerrun", "pc_easy_unlock"};
+
+        for (const QString& key : keys) {
+            for (const QString& item : oldItems) {
+                QSettings settings(key + "\\" + item, QSettings::NativeFormat);
                 settings.remove("");
             }
         }
     }
 
+    bool addContextMenuItem(const QStringList& keys, const QString& itemName,
+                            const QString& displayName, const QString& command) {
+        for (const QString& key : keys) {
+            QSettings settings(key + "\\" + itemName, QSettings::NativeFormat);
+            settings.setValue(".", displayName);
+            settings.setValue("Icon", QDir::toNativeSeparators(QCoreApplication::applicationFilePath()));
+
+            QSettings commandSettings(key + "\\" + itemName + "\\command", QSettings::NativeFormat);
+            commandSettings.setValue(".", command);
+
+            if (settings.status() != QSettings::NoError ||
+                commandSettings.status() != QSettings::NoError) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     SwitchButton *m_autoStartSwitch;
-    SwitchButton *m_explorerShortcutSwitch;
-    SwitchButton *m_powerrunShortcutSwitch;
-    SwitchButton *m_contextMenuSwitch;
+    SwitchButton *m_openWithSwitch;
+    SwitchButton *m_powerRunSwitch;
+    SwitchButton *m_unlockSwitch;
+    bool m_originalAutoStart = false;
+    bool m_originalOpenWith = false;
+    bool m_originalPowerRun = false;
+    bool m_originalUnlock = false;
 };
+
 class DisclaimerDialog : public QDialog {
     Q_OBJECT
 public:
@@ -732,7 +771,7 @@ private:
     int m_index = 0;
 };
 
-// 修改MainWindow类
+// 修改MainWindow类，删除快捷键相关代码
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -741,25 +780,28 @@ public:
         setupUI();
         setupConnections();
         m_trayIcon->show();
+
+        // 显示管理员权限状态
+        if (isRunningAsAdmin()) {
+            setWindowTitle("pc_easy - 多功能系统工具集合 [管理员]");
+        }
+
         // 如果是自启动模式，最小化到托盘
         if (m_autoRun) {
             hide();
-
         }
     }
 
     void activateWindow() {
         HWND hwnd = (HWND)winId();
-        qDebug() << hwnd;
         if (hwnd) {
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
-            qDebug() << hwnd;
         }
     }
 
     ~MainWindow() {
-        KeyboardHook::instance()->unregisterAll();
+        // 删除快捷键相关的清理代码
     }
 
 private:
@@ -780,6 +822,13 @@ private:
         setCentralWidget(centralWidget);
 
         QVBoxLayout* mainLayout = new QVBoxLayout(centralWidget);
+
+        // 权限状态显示
+        if (!isRunningAsAdmin()) {
+            QLabel* adminWarning = new QLabel("<font color='red'><b>⚠️ 当前未以管理员权限运行，部分功能可能受限</b></font>");
+            adminWarning->setAlignment(Qt::AlignCenter);
+            mainLayout->addWidget(adminWarning);
+        }
 
         // 标题
         QLabel* titleLabel = new QLabel("pc_easy");
@@ -818,6 +867,11 @@ private:
         settingsBtn = new QPushButton("设置");
         settingsBtn->setFixedSize(100, 30);
 
+        // 添加重新启动为管理员按钮
+        QPushButton* adminBtn = new QPushButton("重新启动(管理员)");
+        adminBtn->setFixedSize(120, 30);
+        connect(adminBtn, &QPushButton::clicked, this, &MainWindow::restartAsAdmin);
+
         // 添加退出按钮
         QPushButton* exitBtn = new QPushButton("退出程序");
         exitBtn->setFixedSize(100, 30);
@@ -827,7 +881,8 @@ private:
         buttonLayout->addWidget(aboutBtn);
         buttonLayout->addWidget(disclaimerBtn);
         buttonLayout->addWidget(settingsBtn);
-        buttonLayout->addWidget(exitBtn); // 添加退出按钮
+        buttonLayout->addWidget(adminBtn);
+        buttonLayout->addWidget(exitBtn);
         buttonLayout->addStretch();
 
         mainLayout->addLayout(buttonLayout);
@@ -835,6 +890,7 @@ private:
         // 连接信号
         connect(aboutBtn, &QPushButton::clicked, this, &MainWindow::showAboutDialog);
         connect(disclaimerBtn, &QPushButton::clicked, this, &MainWindow::showDisclaimerDialog);
+
         // 创建系统托盘图标
         m_trayIcon = new TrayIcon(this);
 
@@ -846,7 +902,7 @@ private:
         connect(m_trayIcon, &TrayIcon::openPowerRunRequested, this, [this]() {
             QProcess::startDetached(QCoreApplication::applicationDirPath() + "/PowerRun.exe");
         });
-        connect(m_trayIcon, &TrayIcon::openScreenManagerRequested, this, [this]() { // 新增
+        connect(m_trayIcon, &TrayIcon::openScreenManagerRequested, this, [this]() {
             QProcess::startDetached(QCoreApplication::applicationDirPath() + "/screen_ok.exe");
         });
         connect(m_trayIcon, &TrayIcon::openAutorunRequested, this, [this]() {
@@ -857,14 +913,7 @@ private:
         });
         connect(m_trayIcon, &TrayIcon::exitRequested, this, &MainWindow::exitApplication);
 
-        // 连接快捷键信号
-        connect(KeyboardHook::instance(), &KeyboardHook::shortcutTriggered, this, [this](const QString& id) {
-            if (id == "explorer") {
-                QProcess::startDetached(QCoreApplication::applicationDirPath() + "/Exp.exe");
-            } else if (id == "powerrun") {
-                QProcess::startDetached(QCoreApplication::applicationDirPath() + "/PowerRun.exe");
-            }
-        });
+        // 删除快捷键相关代码
     }
 
     void createProjectCards(QGridLayout* layout) {
@@ -893,7 +942,7 @@ private:
         // 项目3: 权限运行工具
         ProjectCard* project3 = new ProjectCard(
             "多权限运行工具",
-            "六层级权限控制系统，从沙盒到系统内核的完整权限管理。支持受限用户、普通用户、管理员、SYSTEM、TrustedInstaller和上帝模式。",
+            "六层级权限控制系统，从普通权限到系统内核的完整权限管理。支持普通用户、管理员、SYSTEM、TrustedInstaller和上帝模式。",
             "powerrun.exe"
             );
         project3->setIndex(2);
@@ -932,12 +981,29 @@ private:
         connect(m_trayIcon, &TrayIcon::exitRequested, this, &MainWindow::exitApplication);
     }
 
-
-
 private slots:
     void showSettingsDialog() {
         SettingsDialog dlg(this);
         dlg.exec();
+    }
+
+    void restartAsAdmin() {
+        if (isRunningAsAdmin()) {
+            QMessageBox::information(this, "提示", "程序已经在管理员权限下运行。");
+            return;
+        }
+
+        QMessageBox::StandardButton reply = QMessageBox::question(this, "重新启动",
+                                                                  "需要重新启动程序以获得管理员权限。\n是否继续？",
+                                                                  QMessageBox::Yes | QMessageBox::No);
+
+        if (reply == QMessageBox::Yes) {
+            if (restartAsAdminRun()) {
+                QApplication::quit();
+            } else {
+                QMessageBox::critical(this, "错误", "无法以管理员权限重新启动程序。");
+            }
+        }
     }
 
     // 添加退出处理函数
@@ -949,7 +1015,6 @@ private slots:
                                       QMessageBox::Yes | QMessageBox::No);
         if (reply == QMessageBox::Yes) {
             // 清理资源
-            KeyboardHook::instance()->unregisterAll();
             m_trayIcon->hide(); // 隐藏托盘图标
             QApplication::quit(); // 退出应用程序
         }
@@ -961,11 +1026,6 @@ private slots:
             // 最小化到托盘而不是退出
             hide();
             event->ignore();
-
-            // // 显示提示消息
-            // m_trayIcon->showMessage("pc_easy",
-            //                         "程序已最小化到系统托盘\n右键点击托盘图标可退出程序",
-            //                         QSystemTrayIcon::Information, 2000);
         } else {
             // 如果托盘不可用，直接退出
             QMainWindow::closeEvent(event);
@@ -973,25 +1033,33 @@ private slots:
     }
 
     void showAboutDialog() {
+        QString adminStatus = isRunningAsAdmin() ? "是" : "否";
+
         QMessageBox::about(this, "关于 pc_easy",
                            "<h2>pc_easy v2.3</h2>"
                            "<p><b>多功能系统工具集合</b></p>"
-                           "<p>本工具集成了五个实用的系统工具：</p>"
-                           "<ul>"
-                           "<li><b>高级文件资源管理器</b> - 强大的文件管理和解锁工具</li>"
-                           "<li><b>系统自启动管理器</b> - 全面的启动项管理</li>"
-                           "<li><b>多权限运行工具</b> - 多种权限级别运行程序</li>"
-                           "<li><b>高级窗口管理器</b> - 专业的窗口管理</li>"
-                           "<li><b>一站式系统优化器</b> - 系统优化和安全设置</li>"
-                           "</ul>"
-                           "<p><b>开发信息：</b></p>"
-                           "<p>• 基于 Qt 6.8 开发</p>"
-                           "<p>• 支持 Windows 10/11 系统</p>"
-                           "<p>• 开源项目</p>"
-                           "<hr>"
-                           "<p>© 2025 zhc9968(个人) - 保留所有权利</p>");
+                           "<p><b>管理员权限:</b> " + adminStatus + "</p>"
+                                               "<p>本工具集成了五个实用的系统工具：</p>"
+                                               "<ul>"
+                                               "<li><b>高级文件资源管理器</b> - 强大的文件管理和解锁工具</li>"
+                                               "<li><b>系统自启动管理器</b> - 全面的启动项管理</li>"
+                                               "<li><b>多权限运行工具</b> - 多种权限级别运行程序</li>"
+                                               "<li><b>高级窗口管理器</b> - 专业的窗口管理</li>"
+                                               "<li><b>一站式系统优化器</b> - 系统优化和安全设置</li>"
+                                               "</ul>"
+                                               "<p><b>右键菜单功能：</b></p>"
+                                               "<ul>"
+                                               "<li><b>使用pc_easy打开</b> - 使用文件资源管理器打开文件/文件夹</li>"
+                                               "<li><b>高权限运行</b> - 以管理员权限运行程序</li>"
+                                               "<li><b>解除文件占用</b> - 强制解锁被占用的文件</li>"
+                                               "</ul>"
+                                               "<p><b>开发信息：</b></p>"
+                                               "<p>• 基于 Qt 6.8 开发</p>"
+                                               "<p>• 支持 Windows 10/11 系统</p>"
+                                               "<p>• 开源项目</p>"
+                                               "<hr>"
+                                               "<p>© 2025 zhc9968(个人) - 保留所有权利</p>");
     }
-
 
     void showDisclaimerDialog() {
         QMessageBox::critical(this, "重要免责声明",
@@ -1045,6 +1113,7 @@ private slots:
             "<li><b>NTFS数据流编辑器</b> - 支持Zone.Identifier等元数据编辑</li>"
             "<li><b>文件属性深度控制</b> - 32种文件属性精确调整</li>"
             "<li><b>进程占用分析</b> - 使用系统句柄表枚举</li>"
+            "<li><b>文件解锁功能</b> - 强制解除文件占用</li>"
             "</ul>",
 
             // 自启动管理器详细描述
@@ -1066,16 +1135,15 @@ private slots:
 
             // 权限运行工具详细描述
             "<h3>多权限运行工具</h3>"
-            "<p><b>六层级权限控制系统，从沙盒到系统内核的完整权限管理</b></p>"
+            "<p><b>六层级权限控制系统，从普通用户到系统内核的完整权限管理</b></p>"
             "<hr>"
             "<h4>六层级权限架构：</h4>"
             "<ul>"
-            "<li><b>Level 1</b> - 受限用户（沙盒环境）</li>"
-            "<li><b>Level 2</b> - 普通用户（标准UAC）</li>"
-            "<li><b>Level 3</b> - 管理员权限</li>"
-            "<li><b>Level 4</b> - SYSTEM系统权限</li>"
-            "<li><b>Level 5</b> - TrustedInstaller权限</li>"
-            "<li><b>Level 6</b> - 上帝模式（最高完整性令牌）</li>"
+            "<li><b>Level 1</b> - 普通用户（标准UAC）</li>"
+            "<li><b>Level 2</b> - 管理员权限</li>"
+            "<li><b>Level 3</b> - SYSTEM系统权限</li>"
+            "<li><b>Level 4</b> - TrustedInstaller权限</li>"
+            "<li><b>Level 5</b> - 上帝模式（最高完整性令牌）</li>"
             "</ul>"
             "<h4>技术实现：</h4>"
             "<ul>"
@@ -1151,15 +1219,40 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 检查管理员权限，如果不是管理员且不是强制新实例，则请求提权
+    if (!isRunningAsAdmin() && !forceNewInstance) {
+        QMessageBox::StandardButton reply = QMessageBox::question(nullptr, "权限提示",
+                                                                  "pc_easy 需要管理员权限才能完整运行所有功能。\n"
+                                                                  "是否以管理员权限重新启动程序？\n\n"
+                                                                  "选择\"否\"将以普通权限运行，但部分功能可能受限。",
+                                                                  QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+                                                                  QMessageBox::Yes);
+
+        if (reply == QMessageBox::Yes) {
+            if (restartAsAdminRun()) {
+                return 0; // 退出当前实例
+            } else {
+                QMessageBox::warning(nullptr, "警告",
+                                     "无法以管理员权限重新启动程序。\n"
+                                     "程序将以普通权限运行，部分功能可能受限。");
+            }
+        } else if (reply == QMessageBox::Cancel) {
+            return 0; // 用户取消，退出程序
+        }
+    }
+
     // 设置应用程序唯一标识
-    const QString appId = "pc_easy_instance";
+    const QString appId = isRunningAsAdmin() ? "pc_easy_instance_admin" : "pc_easy_instance";
 
     // 单实例检查（除非强制新实例）
     QSharedMemory sharedMemory;
     sharedMemory.setKey(appId);
 
     if (!forceNewInstance && sharedMemory.attach()) {
-        QMessageBox::information(QWidget::createWindowContainer(QWindow::fromWinId((WId)GetDesktopWindow())), "提示", "pc_easy已经在运行，你可以在系统托盘中找到他。");
+        QMessageBox::information(nullptr, "提示",
+                                 isRunningAsAdmin() ?
+                                     "pc_easy已经在运行（管理员模式），你可以在系统托盘中找到他。" :
+                                     "pc_easy已经在运行（普通模式），你可以在系统托盘中找到他。");
         return 0; // 退出新实例
     }
 
@@ -1179,15 +1272,25 @@ int main(int argc, char *argv[]) {
                              "单实例功能可能受限。");
     }
 
-    // 检查注册表判断是否需要显示免责声明
-    QSettings settings("HKEY_CURRENT_USER\\Software\\pc_easy", QSettings::NativeFormat);
+    // 检查注册表判断是否需要显示免责声明（使用全局注册表）
+    QSettings settings("HKEY_LOCAL_MACHINE\\Software\\pc_easy", QSettings::NativeFormat);
     bool disclaimerAgreed = settings.value("disclaimerHasBeenAgreed", false).toBool();
+
+    // 如果全局注册表无法访问，尝试用户注册表
+    if (settings.status() != QSettings::NoError) {
+        QSettings userSettings("HKEY_CURRENT_USER\\Software\\pc_easy", QSettings::NativeFormat);
+        disclaimerAgreed = userSettings.value("disclaimerHasBeenAgreed", false).toBool();
+    }
 
     if (!disclaimerAgreed) {
         DisclaimerDialog dlg;
         if (dlg.exec() == QDialog::Accepted) {
-            // 用户同意后设置注册表值
+            // 用户同意后设置注册表值（优先尝试全局注册表）
             settings.setValue("disclaimerHasBeenAgreed", true);
+            if (settings.status() != QSettings::NoError) {
+                QSettings userSettings("HKEY_CURRENT_USER\\Software\\pc_easy", QSettings::NativeFormat);
+                userSettings.setValue("disclaimerHasBeenAgreed", true);
+            }
         } else {
             // 用户不同意则退出程序
             return 0;

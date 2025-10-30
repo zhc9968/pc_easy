@@ -311,12 +311,11 @@ QVector<ProcessInfo> FileUnlocker::getLockingProcessesByRestartManager(const QSt
             info.processId = procInfo.Process.dwProcessId;
             info.filePath = filePath;
             info.handleValue = 0; // 重启管理器不提供句柄值，后续补充
-
+            info.processPath = getProcessPath(info.processId);
             // 获取进程名称
             if (procInfo.strAppName[0] != L'\0') {
                 info.processName = QString::fromWCharArray(procInfo.strAppName);
             } else {
-                info.processPath = getProcessPath(info.processId);
                 info.processName = getProcessNameFromPath(info.processPath);
 
                 if (info.processName.isEmpty()) {
@@ -501,7 +500,6 @@ QVector<ProcessInfo> FileUnlocker::getLockingProcessesByKernelObjects(const QStr
             } else {
                 info.processId = processId;
                 info.processName = getProcessName(processId);
-                info.processPath = getProcessPath(processId);
                 processInfoCache.insert(processId, info);
             }
 
@@ -687,9 +685,16 @@ QString FileUnlocker::getProcessPath(DWORD processId) {
     if (!hProcess) return QString();
 
     WCHAR processPath[MAX_PATH] = {0};
-    DWORD size = MAX_PATH;
 
-    if (GetProcessImageFileNameW(hProcess, processPath, size)) {
+    // 方法1：使用 QueryFullProcessImageNameW（推荐）
+    DWORD size = MAX_PATH;
+    if (QueryFullProcessImageNameW(hProcess, 0, processPath, &size)) {
+        CloseHandle(hProcess);
+        return QString::fromWCharArray(processPath);
+    }
+
+    // 方法2：如果方法1失败，使用 GetModuleFileNameExW
+    if (GetModuleFileNameExW(hProcess, NULL, processPath, MAX_PATH)) {
         CloseHandle(hProcess);
         return QString::fromWCharArray(processPath);
     }

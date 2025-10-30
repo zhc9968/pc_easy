@@ -1787,7 +1787,12 @@ int main(int argc, char *argv[]) {
                 selectFile = fileInfo.fileName();
             }
         }
+        if (argc > 2) {
+            FileUnlockDialog Dlg(fileInfo.absoluteFilePath());
+            return Dlg.exec();
+        }
     }
+
 
     Explorer explorer(initialPath, selectFile);
     explorer.show();

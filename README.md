@@ -3,7 +3,8 @@
 > **参赛赛事**：第四届深港澳青少年创意设计大赛（创意新媒体-小软件类别）  
 > **参赛者**：张鸿晨（深圳市高级中学初中部南校区）  
 > **作品性质**：本项目由参赛者 **独立开发**，代码开源，原创性可通过 [GitHub 提交历史](https://github.com/zhc9968/pc_easy/commits/main) 查验。  
-> **Gitee**：同地址 [Gitee](http://gitee.com/zhc9968/pc_easy) 仓库也由 **本作者** 提交。
+> **Gitee**：同地址 [Gitee](http://gitee.com/zhc9968/pc_easy) 仓库也由 **本作者** 提交。  
+> **注**：github账户 _hongchenge_ 是我的旧账号
 
 # pc_easy - 多功能系统工具集合
 
